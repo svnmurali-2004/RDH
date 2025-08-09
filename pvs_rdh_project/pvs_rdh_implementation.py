@@ -1,483 +1,295 @@
-# PVS-RDH: Pixel Value Splitting based Reversible Data Hiding Implementation
-# Based on the paper: "Pixel value splitting based reversible data embedding scheme"
-# Authors: Ankita Meenpal, Saikat Majumder, Madhu Oruganti
-
 import numpy as np
-import cv2
-from PIL import Image
-import matplotlib.pyplot as plt
-import json
+import struct
 
 class PVS_RDH:
-    """
-    Pixel Value Splitting based Reversible Data Hiding (PVS-RDH) Implementation
-    """
-    
-    def __init__(self, K1=4, K2=6):
+    def __init__(self, K1=4, K2=6, overlap=False):
         """
-        Initialize PVS-RDH with offset parameters
-        
-        Args:
-            K1 (int): Positive offset for Group-B modification (default: 4)
-            K2 (int): Negative offset for Group-B modification (default: 6)
-                     Note: K1 + K2 must equal 10
+        K1 + K2 must equal 10 (because B in [0..9]).
+        overlap: if False (default) form non-overlapping horizontal pairs (q, q+1 with step 2).
+                 if True, use every adjacent pair (slower, higher capacity).
         """
         if K1 + K2 != 10:
             raise ValueError("K1 + K2 must equal 10")
-        
-        self.K1 = K1
-        self.K2 = K2
-        self.embedding_capacity = 0
-        self.auxiliary_data = []
-        
-    def pixel_value_splitting(self, image):
-        """
-        Algorithm 1: Split pixel values into Group-A and Group-B
-        
-        Args:
-            image (numpy.ndarray): 8-bit grayscale image
-            
-        Returns:
-            tuple: (group_A, group_B) arrays
-        """
-        # Group-A: hundreds and tens digits (floor division by 10)
-        group_A = image // 10
-        
-        # Group-B: ones digit (modulo 10)
-        group_B = image % 10
-        
-        return group_A, group_B
-    
-    def find_embedding_pairs(self, group_A):
-        """
-        Find embedding pairs where adjacent Group-A values are equal
-        
-        Args:
-            group_A (numpy.ndarray): Group-A values
-            
-        Returns:
-            list: List of embedding pair positions [(row, col1, col2), ...]
-        """
-        embedding_pairs = []
-        rows, cols = group_A.shape
-        
-        # Check horizontal pairs (row-wise)
-        for i in range(rows):
-            for j in range(cols - 1):
-                # Condition: A(p,q) = A(p,q+1) AND A(p,q) > 1
-                if group_A[i, j] == group_A[i, j + 1] and group_A[i, j] > 1:
-                    embedding_pairs.append((i, j, j + 1))
-        
-        return embedding_pairs
-    
-    def generate_auxiliary_data(self, group_A, embedding_pairs):
-        """
-        Generate auxiliary data for underflow handling
-        
-        Args:
-            group_A (numpy.ndarray): Group-A values
-            embedding_pairs (list): List of embedding pairs
-            
-        Returns:
-            list: Auxiliary data (underflow locations)
-        """
-        auxiliary_data = []
-        
-        for pair in embedding_pairs:
-            i, j1, j2 = pair
-            # Check for potential underflow (A(p,q+1) = 0)
-            if group_A[i, j1] > 1 and group_A[i, j2] == 0:
-                auxiliary_data.append((i, j2))
-        
-        return auxiliary_data
-    
-    def perform_histogram_shifting(self, group_A, embedding_pairs):
-        """
-        Perform histogram shifting to avoid conflicts
-        
-        Args:
-            group_A (numpy.ndarray): Group-A values
-            embedding_pairs (list): Embedding pairs
-            
-        Returns:
-            numpy.ndarray: Modified Group-A after shifting
-        """
-        group_A_shifted = group_A.copy()
-        rows, cols = group_A.shape
-        
-        # Apply shifting for pairs with difference >= 1
-        for i in range(rows):
-            for j in range(cols - 1):
-                difference = group_A[i, j] - group_A[i, j + 1]
-                if difference >= 1:
-                    # Check if this pair is not an embedding pair
-                    if (i, j, j + 1) not in embedding_pairs:
-                        group_A_shifted[i, j + 1] -= 1
-        
-        return group_A_shifted
-    
-    def embed_watermark(self, image, watermark_bits):
-        """
-        Main embedding function
-        
-        Args:
-            image (numpy.ndarray): Original 8-bit grayscale image
-            watermark_bits (str): Binary string of watermark data
-            
-        Returns:
-            tuple: (embedded_image, embedding_info)
-        """
-        print("Starting PVS-RDH Embedding Process...")
-        
-        # Step 1: Pixel Value Splitting
-        group_A, group_B = self.pixel_value_splitting(image)
-        print(f"Image split into Group-A and Group-B")
-        
-        # Step 2: Find embedding pairs
-        embedding_pairs = self.find_embedding_pairs(group_A)
-        self.embedding_capacity = len(embedding_pairs)
-        print(f"Found {self.embedding_capacity} embedding pairs")
-        
-        if self.embedding_capacity == 0:
-            raise ValueError("No embedding pairs found. Image may be too textured.")
-        
-        # Step 3: Generate auxiliary data
-        self.auxiliary_data = self.generate_auxiliary_data(group_A, embedding_pairs)
-        auxiliary_bits = len(self.auxiliary_data) * 16  # 16 bits per location
-        print(f"Auxiliary data size: {auxiliary_bits} bits")
-        
-        # Step 4: Check if watermark fits
-        available_capacity = self.embedding_capacity - auxiliary_bits
-        if len(watermark_bits) > available_capacity:
-            print(f"Warning: Watermark ({len(watermark_bits)} bits) truncated to fit capacity ({available_capacity} bits)")
-            watermark_bits = watermark_bits[:available_capacity]
-        
-        # Step 5: Perform histogram shifting
-        group_A_shifted = self.perform_histogram_shifting(group_A, embedding_pairs)
-        
-        # Step 6: Embed watermark bits
-        group_A_embedded = group_A_shifted.copy()
-        group_B_embedded = group_B.copy()
-        
-        # Combine auxiliary data and watermark
-        total_data = self._encode_auxiliary_data() + watermark_bits
-        
-        for idx, bit in enumerate(total_data[:len(embedding_pairs)]):
-            if idx >= len(embedding_pairs):
-                break
-                
-            i, j1, j2 = embedding_pairs[idx]
-            
-            # Skip if would cause underflow
-            if (i, j2) in self.auxiliary_data:
-                continue
-            
-            if bit == '1':
-                # Embed bit 1: subtract 1 from A(p,q+1)
-                group_A_embedded[i, j2] -= 1
-                
-                # Apply Group-B offset for quality enhancement
-                if group_B[i, j2] < self.K2:
-                    group_B_embedded[i, j2] = (group_B[i, j2] + self.K1) % 10
-                else:
-                    group_B_embedded[i, j2] = (group_B[i, j2] - self.K2) % 10
-        
-        # Step 7: Reconstruct embedded image
-        embedded_image = group_A_embedded * 10 + group_B_embedded
-        
-        # Calculate quality metrics
-        mse = np.mean((image - embedded_image) ** 2)
-        psnr = 10 * np.log10(255**2 / mse) if mse > 0 else float('inf')
-        
-        embedding_info = {
-            'embedding_pairs': len(embedding_pairs),
-            'auxiliary_data_size': auxiliary_bits,
-            'watermark_length': len(watermark_bits),
-            'psnr': psnr,
-            'mse': mse,
-            'embedding_pairs_list': embedding_pairs,
-            'auxiliary_data': self.auxiliary_data,
-            'K1': self.K1,
-            'K2': self.K2
-        }
-        
-        print(f"Embedding completed successfully!")
-        print(f"PSNR: {psnr:.2f} dB")
-        print(f"Embedded {len(watermark_bits)} watermark bits")
-        
-        return embedded_image, embedding_info
-    
-    def extract_watermark(self, embedded_image, embedding_info):
-        """
-        Extract watermark and recover original image
-        
-        Args:
-            embedded_image (numpy.ndarray): Embedded image
-            embedding_info (dict): Information from embedding process
-            
-        Returns:
-            tuple: (extracted_watermark, recovered_image)
-        """
-        print("Starting PVS-RDH Extraction Process...")
-        
-        # Step 1: Split embedded image
-        group_A_embedded, group_B_embedded = self.pixel_value_splitting(embedded_image)
-        
-        # Step 2: Extract watermark bits
-        embedding_pairs = embedding_info['embedding_pairs_list']
-        auxiliary_data = embedding_info['auxiliary_data']
-        K1, K2 = embedding_info['K1'], embedding_info['K2']
-        
-        extracted_bits = []
-        group_A_recovered = group_A_embedded.copy()
-        group_B_recovered = group_B_embedded.copy()
-        
-        for idx, pair in enumerate(embedding_pairs):
-            i, j1, j2 = pair
-            
-            # Skip auxiliary data locations
-            if (i, j2) in auxiliary_data:
-                extracted_bits.append('0')  # Placeholder
-                continue
-            
-            # Extract bit based on difference
-            difference = group_A_embedded[i, j1] - group_A_embedded[i, j2]
-            
-            if difference == 1:
-                extracted_bits.append('1')
-                # Recover Group-A
-                group_A_recovered[i, j2] += 1
-                # Recover Group-B
-                if group_B_embedded[i, j2] < K2:
-                    group_B_recovered[i, j2] = (group_B_embedded[i, j2] - K1) % 10
-                else:
-                    group_B_recovered[i, j2] = (group_B_embedded[i, j2] + K2) % 10
-            else:
-                extracted_bits.append('0')
-        
-        # Step 3: Reverse histogram shifting
-        rows, cols = group_A_recovered.shape
-        for i in range(rows):
-            for j in range(cols - 1):
-                if (i, j, j + 1) not in embedding_pairs:
-                    difference = group_A_recovered[i, j] - group_A_recovered[i, j + 1]
-                    if difference >= 2:
-                        group_A_recovered[i, j + 1] += 1
-        
-        # Step 4: Reconstruct original image
-        recovered_image = group_A_recovered * 10 + group_B_recovered
-        
-        # Step 5: Separate auxiliary data from watermark
-        auxiliary_bits = len(auxiliary_data) * 16
-        watermark_bits = ''.join(extracted_bits[auxiliary_bits:])
-        
-        print(f"Extraction completed successfully!")
-        print(f"Extracted {len(watermark_bits)} bits")
-        
-        return watermark_bits, recovered_image
-    
-    def _encode_auxiliary_data(self):
-        """
-        Encode auxiliary data as binary string
-        
-        Returns:
-            str: Binary representation of auxiliary data
-        """
-        if not self.auxiliary_data:
-            return '0' * 16  # 16 bits representing length 0
-        
-        # Encode length (16 bits) + locations
-        length_bits = format(len(self.auxiliary_data), '016b')
-        location_bits = ''
-        
-        for i, j in self.auxiliary_data:
-            # Encode each location as 16 bits (8 bits each for i, j)
-            location_bits += format(i, '08b') + format(j, '08b')
-        
-        return length_bits + location_bits
-    
-    def calculate_metrics(self, original_image, embedded_image):
-        """
-        Calculate image quality metrics
-        
-        Args:
-            original_image (numpy.ndarray): Original image
-            embedded_image (numpy.ndarray): Embedded image
-            
-        Returns:
-            dict: Quality metrics
-        """
-        # MSE
-        mse = np.mean((original_image - embedded_image) ** 2)
-        
-        # PSNR
-        psnr = 10 * np.log10(255**2 / mse) if mse > 0 else float('inf')
-        
-        # SSIM (simplified version)
-        def ssim(img1, img2):
-            mu1, mu2 = img1.mean(), img2.mean()
-            sigma1, sigma2 = img1.var(), img2.var()
-            sigma12 = np.mean((img1 - mu1) * (img2 - mu2))
-            
-            c1, c2 = 0.01**2, 0.03**2
-            ssim_val = ((2*mu1*mu2 + c1) * (2*sigma12 + c2)) / ((mu1**2 + mu2**2 + c1) * (sigma1 + sigma2 + c2))
-            return ssim_val
-        
-        ssim_val = ssim(original_image, embedded_image)
-        
-        return {
-            'mse': mse,
-            'psnr': psnr,
-            'ssim': ssim_val
-        }
+        self.K1 = int(K1)
+        self.K2 = int(K2)
+        self.overlap = bool(overlap)
 
-def demo_pvs_rdh():
-    """
-    Demonstration of PVS-RDH algorithm
-    """
-    print("=== PVS-RDH Demonstration ===\n")
-    
-    # Create a sample image (or load from file)
-    # For demo, create a 64x64 synthetic image with smooth regions
-    image = np.random.randint(140, 170, size=(64, 64), dtype=np.uint8)
-    
-    # Add some smooth regions
-    image[10:20, 10:30] = 145
-    image[30:40, 20:40] = 152
-    image[20:30, 45:55] = 148
-    
-    print(f"Original image shape: {image.shape}")
-    print(f"Pixel value range: {image.min()} - {image.max()}")
-    
-    # Initialize PVS-RDH
-    pvs = PVS_RDH(K1=4, K2=6)
-    
-    # Watermark to embed
-    watermark = "1101001110101010"  # 16-bit example watermark
-    print(f"Watermark to embed: '{watermark}' ({len(watermark)} bits)")
-    
-    try:
-        # Embedding process
-        embedded_image, embedding_info = pvs.embed_watermark(image, watermark)
-        
-        # Display embedding statistics
-        print(f"\nEmbedding Statistics:")
-        print(f"- Embedding pairs: {embedding_info['embedding_pairs']}")
-        print(f"- Auxiliary data: {embedding_info['auxiliary_data_size']} bits")
-        print(f"- Watermark length: {embedding_info['watermark_length']} bits")
-        print(f"- PSNR: {embedding_info['psnr']:.2f} dB")
-        
-        # Extraction process
-        extracted_watermark, recovered_image = pvs.extract_watermark(embedded_image, embedding_info)
-        
-        # Verify results
-        print(f"\nExtraction Results:")
-        print(f"Original watermark:  '{watermark}'")
-        print(f"Extracted watermark: '{extracted_watermark}'")
-        print(f"Watermark match: {'✓' if watermark == extracted_watermark else '✗'}")
-        
-        # Check image recovery
-        image_diff = np.sum(np.abs(image.astype(int) - recovered_image.astype(int)))
-        print(f"Image recovery: {'✓' if image_diff == 0 else '✗'} (diff: {image_diff})")
-        
-        # Calculate final metrics
-        metrics = pvs.calculate_metrics(image, embedded_image)
-        print(f"\nFinal Quality Metrics:")
-        print(f"- MSE: {metrics['mse']:.2f}")
-        print(f"- PSNR: {metrics['psnr']:.2f} dB")
-        print(f"- SSIM: {metrics['ssim']:.4f}")
-        
-        return {
-            'success': True,
-            'original_image': image,
-            'embedded_image': embedded_image,
-            'recovered_image': recovered_image,
-            'watermark': watermark,
-            'extracted_watermark': extracted_watermark,
-            'metrics': metrics,
-            'embedding_info': embedding_info
-        }
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        return {'success': False, 'error': str(e)}
+    # --- helpers for bit-strings ---
+    @staticmethod
+    def bits_from_string(bitstr):
+        """Take string of '0'/'1' characters and return list of ints (0/1)."""
+        return [1 if c == '1' else 0 for c in bitstr]
 
-def load_and_process_image(image_path, watermark_text):
-    """
-    Load an image file and process it with PVS-RDH
-    
-    Args:
-        image_path (str): Path to image file
-        watermark_text (str): Text to embed (will be converted to binary)
-        
-    Returns:
-        dict: Processing results
-    """
-    try:
-        # Load image
-        if image_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    @staticmethod
+    def string_from_bits(bit_list):
+        return ''.join('1' if b else '0' for b in bit_list)
+
+    @staticmethod
+    def _pack_S(beta_indices):
+        """
+        Pack bookkeeping S:
+        - 16-bit unsigned: count
+        - For each index: 32-bit unsigned
+        Returns bytes.
+        """
+        count = len(beta_indices)
+        packed = struct.pack(">H", count)  # big-endian 16-bit
+        if count:
+            packed += b''.join(struct.pack(">I", int(idx)) for idx in beta_indices)
+        return packed
+
+    @staticmethod
+    def _unpack_S(packed_bytes):
+        """Return list of indices."""
+        if len(packed_bytes) < 2:
+            return []
+        count = struct.unpack(">H", packed_bytes[:2])[0]
+        indices = []
+        offset = 2
+        for _ in range(count):
+            if offset + 4 > len(packed_bytes):
+                raise ValueError("S data truncated")
+            idx = struct.unpack(">I", packed_bytes[offset:offset+4])[0]
+            indices.append(idx)
+            offset += 4
+        return indices
+
+    def _scan_pairs(self, H, W):
+        """Yield pair coordinate tuples (p,q,q+1) according to overlap mode."""
+        if self.overlap:
+            for r in range(H):
+                for c in range(W - 1):
+                    yield (r, c, c + 1)
         else:
-            # Try PIL for other formats
-            pil_image = Image.open(image_path).convert('L')
-            image = np.array(pil_image)
-        
-        if image is None:
-            raise ValueError("Could not load image")
-        
-        print(f"Loaded image: {image.shape}")
-        
-        # Convert text to binary
-        watermark_bits = ''.join(format(ord(c), '08b') for c in watermark_text)
-        
-        # Initialize and run PVS-RDH
-        pvs = PVS_RDH()
-        embedded_image, embedding_info = pvs.embed_watermark(image, watermark_bits)
-        extracted_watermark, recovered_image = pvs.extract_watermark(embedded_image, embedding_info)
-        
-        # Convert binary back to text
-        extracted_text = ''
-        for i in range(0, len(extracted_watermark), 8):
-            if i + 8 <= len(extracted_watermark):
-                byte = extracted_watermark[i:i+8]
-                if len(byte) == 8:
-                    extracted_text += chr(int(byte, 2))
-        
-        return {
-            'success': True,
-            'original_text': watermark_text,
-            'extracted_text': extracted_text,
-            'match': watermark_text == extracted_text,
-            'metrics': pvs.calculate_metrics(image, embedded_image)
-        }
-        
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
+            for r in range(H):
+                for c in range(0, W - 1, 2):
+                    yield (r, c, c + 1)
 
-if __name__ == "__main__":
-    # Run demonstration
-    result = demo_pvs_rdh()
-    
-    if result['success']:
-        print(f"\n🎉 PVS-RDH Demo completed successfully!")
-        
-        # Optional: Save results
-        save_results = input("\nSave results to files? (y/n): ").lower() == 'y'
-        
-        if save_results:
-            # Save images
-            cv2.imwrite('original_image.png', result['original_image'])
-            cv2.imwrite('embedded_image.png', result['embedded_image'])
-            cv2.imwrite('recovered_image.png', result['recovered_image'])
-            
-            # Save embedding info
-            with open('embedding_info.json', 'w') as f:
-                # Convert numpy arrays to lists for JSON serialization
-                info = result['embedding_info'].copy()
-                info['embedding_pairs_list'] = [list(pair) for pair in info['embedding_pairs_list']]
-                info['auxiliary_data'] = [list(pair) for pair in info['auxiliary_data']]
-                json.dump(info, f, indent=2)
-            
-            print("Results saved to files!")
-    else:
-        print(f"❌ Demo failed: {result['error']}")
+    def embed_watermark(self, img_uint8, watermark_bits):
+        """
+        img_uint8: 2D numpy uint8 grayscale image
+        watermark_bits: string of '0'/'1' bits (e.g. ''.join(format(ord(c),'08b') for c in text))
+        Returns: (embedded_image (uint8 numpy), info dict)
+        info contains serialized S and metadata required for extraction.
+        """
+        if img_uint8.dtype != np.uint8:
+            raise ValueError("Image must be uint8 grayscale")
+        H, W = img_uint8.shape
+
+        # Split
+        A = (img_uint8 // 10).astype(np.int16)  # A in [0..25]
+        B = (img_uint8 % 10).astype(np.int16)  # B in [0..9]
+
+        # Build list of candidate pair indices (linear index for second pixel in pair)
+        candidate_coords = []
+        for r, c1, c2 in self._scan_pairs(H, W):
+            if A[r, c1] == A[r, c2] and A[r, c1] > 1:
+                candidate_coords.append((r, c1, c2))
+
+        gamma = len(candidate_coords)
+        # We'll build bookkeeping beta for underflow cases where A[r,c2]==0 and we'd need to -1
+        beta = []
+        # we will build a bitlist to embed (S + W'), but first compute S size
+        # S is packed as: 16-bit count + 32-bit per index
+        # convert watermark to bit list
+        bits = self.bits_from_string(watermark_bits)
+
+        # For simplicity, determine beta by seeing which candidates WOULD require subtract 1 when bit=1
+        # but we only reserve/unmodify those at embedding time; still record their indices now:
+        for (r, c1, c2) in candidate_coords:
+            if A[r, c2] == 0:
+                # would cause underflow if we tried to subtract 1 to embed '1'
+                beta.append(r * W + c2)
+
+        # pack S
+        S_bytes = self._pack_S(beta)
+        Sl = len(S_bytes) * 8  # bits
+
+        # total available bits = gamma
+        if gamma <= Sl:
+            raise ValueError(f"Not enough capacity: gamma={gamma} <= bookkeeping bits Sl={Sl}")
+
+        # remaining bits available for watermark payload
+        payload_capacity = gamma - Sl
+        # Trim watermark if necessary
+        if len(bits) > payload_capacity:
+            # either error or trim -- we trim (user can detect from info)
+            bits = bits[:payload_capacity]
+
+        # Build full bitstream W = S || W'
+        # convert S_bytes to bit string
+        S_bitstr = ''.join(f"{byte:08b}" for byte in S_bytes)
+        full_bits = [1 if c == '1' else 0 for c in (S_bitstr + self.string_from_bits(bits))]
+
+        # Now embed across candidates. We'll iterate candidate by candidate and consume full_bits.
+        embA = A.copy()
+        embB = B.copy()
+        bit_ptr = 0
+        # When embedding we must skip modifying pair if it was in beta (i.e., underflow)
+        beta_set = set(beta)
+
+        for (r, c1, c2) in candidate_coords:
+            if bit_ptr >= len(full_bits):
+                break
+            lin_idx_c2 = r * W + c2
+            # If this candidate is marked as in beta (underflow) we must NOT modify it (store index in S)
+            if lin_idx_c2 in beta_set:
+                # do nothing; BUT S recorded that index so extractor knows it was skipped
+                continue
+            bit = full_bits[bit_ptr]
+            bit_ptr += 1
+            if bit == 1:
+                # subtract 1 from A(r,c2)
+                embA[r, c2] = embA[r, c2] - 1
+            else:
+                # leave as is
+                pass
+
+            # After we change A we adjust B at position c2 as per eq (6)
+            bval = embB[r, c2]
+            if bval < self.K2:
+                bnew = bval + self.K1
+            else:
+                bnew = bval - self.K2
+            # ensure in [0..9]
+            bnew = int(np.clip(bnew, 0, 9))
+            embB[r, c2] = bnew
+
+        # Compose embedded image
+        emb_img = (embA * 10 + embB).astype(np.uint8)
+
+        # Build info dictionary
+        info = {
+            "H": int(H), "W": int(W),
+            "K1": int(self.K1), "K2": int(self.K2),
+            "overlap": bool(self.overlap),
+            "gamma": int(gamma),
+            "S_bytes": S_bytes,
+            "payload_len": len(bits),   # number of watermark bits actually embedded
+            "full_len": len(full_bits)
+        }
+        return emb_img, info
+
+    def extract_watermark(self, emb_img_uint8, info):
+        """
+        Return (extracted_bits_string, recovered_image_uint8)
+        info must be the dict returned by embed_watermark.
+        """
+        H = info["H"]; W = info["W"]
+        K1 = info["K1"]; K2 = info["K2"]
+        overlap = info["overlap"]
+
+        if emb_img_uint8.dtype != np.uint8:
+            raise ValueError("Image must be uint8 grayscale")
+
+        A_p = (emb_img_uint8 // 10).astype(np.int16)
+        B_p = (emb_img_uint8 % 10).astype(np.int16)
+
+        # Recreate scan order
+        # build candidate coords in same order used in embed
+        candidate_coords = []
+        if overlap:
+            for r in range(H):
+                for c in range(W - 1):
+                    if A_p[r, c] == A_p[r, c + 1] and A_p[r, c] > 1:
+                        candidate_coords.append((r, c, c + 1))
+        else:
+            for r in range(H):
+                for c in range(0, W - 1, 2):
+                    if A_p[r, c] == A_p[r, c + 1] and A_p[r, c] > 1:
+                        candidate_coords.append((r, c, c + 1))
+
+        # Extract bits by scanning candidates. We need to know S length (from its 16-bit header).
+        # But S was embedded as the first Sl bits across embed candidates (skipping beta positions during embedding).
+        # So extraction approach:
+        # 1) build a list of indices where extraction would read/would skip (we need to know beta indices so first bytes of S are present in the stream)
+        # To recover S we must reconstruct same skipping logic from candidates: the extractor reconstructs the bitstream by reading / deriving bits from A' differences.
+        # But recall in embedding, candidates with A==A and A>1 were used; those with A[c2]==0 were appended to beta and not modified.
+        # During extraction we DO NOT know beta until we read S; this is circular. The paper handles this by embedding S first (i.e., it's part of W so first bits read correspond to S header). With the scanning rules used above the reading logic is:
+        #  - We attempt to read bits from every candidate pair in order by checking D' = A'[p,q] - A'[p,q+1]
+        #  - If D' == 1 -> extracted bit 1 and we restore A''[p,q+1] = A'[p,q+1] + 1
+        #  - If D' == 0 -> extracted bit 0 and A'' unchanged
+        #  - If D' >= 2 => it was a shifted pair (from D>=1 shifting) -> we restore by adding 1 to A'[p,q+1] (reverse shifting)
+        #
+        # So we can simply iterate candidates and reconstruct a stream of bits (0/1) and also apply reverse shifting immediately.
+        extracted_bits = []
+        restoredA = A_p.copy()
+        restoredB = B_p.copy()
+
+        # First pass: derive a raw sequence of bits and simultaneously restore shifted pairs.
+        for (r, c1, c2) in candidate_coords:
+            d = int(restoredA[r, c1] - restoredA[r, c2])
+            if d == 1:
+                extracted_bits.append(1)
+                # recover A''(p,q+1) = A'(p,q+1) + 1
+                restoredA[r, c2] = restoredA[r, c2] + 1
+            elif d == 0:
+                extracted_bits.append(0)
+                # nothing to change
+            elif d >= 2:
+                # reverse shifting case (12)
+                restoredA[r, c2] = restoredA[r, c2] + 1
+                # this position was not used for embedding a bit (it was a shifted pair), so we do NOT append a bit
+                # but paper says D'>=2 means re-shifting; in practice we should not map it to a message bit. So do nothing else.
+            else:
+                # negative difference shouldn't occur, but if it does, treat as 0 (safe fallback)
+                extracted_bits.append(0)
+
+        # extracted_bits now contains a bitstream that equals S || W'
+        # Reconstruct S_bytes: first 16 bits give count, but S was packed as bytes; so convert first 16 bits to get count and then read that many 32-bit indices.
+        if len(extracted_bits) < 16:
+            raise ValueError("Not enough extracted bits to recover bookkeeping")
+
+        # build bit-string
+        bitstr = ''.join('1' if b else '0' for b in extracted_bits)
+        # recover first bytes corresponding to S: but S length in bits is dynamic (2 + 4*count)*8
+        # read first 16 bits as count
+        count = int(bitstr[:16], 2)
+        expected_S_bits = 16 + count * 32
+        if len(bitstr) < expected_S_bits:
+            # may occur if embed used less bits than possible; raise helpful error
+            raise ValueError("Extracted stream too short to recover S fully (bad info or mismatch).")
+
+        # reconstruct S_bytes from those bits
+        S_bits = bitstr[:expected_S_bits]
+        # convert every 8 bits to byte
+        S_bytes = bytes(int(S_bits[i:i+8], 2) for i in range(0, len(S_bits), 8))
+        beta_indices = self._unpack_S(S_bytes)
+
+        # Now W' bits follow
+        Wprime_bits = bitstr[expected_S_bits: expected_S_bits + (info["payload_len"])]
+        extracted_payload_bits = [1 if c == '1' else 0 for c in Wprime_bits]
+
+        # Now reverse B adjustments for every candidate position that was modified.
+        # Note: some positions were in beta (skipped), others had B changed during embedding.
+        beta_set = set(beta_indices)
+        payload_ptr = 0
+        for (r, c1, c2) in candidate_coords:
+            lin_idx_c2 = r * W + c2
+            if lin_idx_c2 in beta_set:
+                # this location was unmodified at embedding time (we recorded it), so skip reverse op
+                continue
+            # If this candidate actually carried a bit in the embedded stream depends on whether we consumed a bit for it.
+            # During extraction we used extracted_bits in same order; the first bits after S correspond to actual W'
+            if payload_ptr >= len(extracted_payload_bits):
+                break
+            # reverse the B mapping used in embedding:
+            bprime = int(restoredB[r, c2])
+            if bprime < K2:
+                # in embedding we did bnew = b + K1  => so now b = bnew - K1
+                borig = bprime - K1
+            else:
+                # embedding did bnew = b - K2 => so now b = bnew + K2
+                borig = bprime + K2
+            # clip to 0..9
+            restoredB[r, c2] = int(np.clip(borig, 0, 9))
+
+            # Advance payload pointer (we consumed one message bit here)
+            payload_ptr += 1
+
+        # Recombine restoredA and restoredB to get recovered image
+        recovered_img = (restoredA * 10 + restoredB).astype(np.uint8)
+
+        # Return extracted watermark bits as string and recovered image
+        extracted_bitstring = ''.join('1' if b else '0' for b in extracted_payload_bits)
+        return extracted_bitstring, recovered_img
