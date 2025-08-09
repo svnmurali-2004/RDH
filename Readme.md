@@ -24,36 +24,56 @@ pvs_rdh_project/
 
 ### 1. Basic Usage (Command Line)
 ```python
-from pvs_rdh_implementation import PVS_RDH
-import numpy as np
 import cv2
+import importlib
+import matplotlib.pyplot as plt
+import pvs_rdh_implementation
+importlib.reload(pvs_rdh_implementation)
 
-# Load your image
-image = cv2.imread('your_image.png', cv2.IMREAD_GRAYSCALE)
+from pvs_rdh_implementation import PVS_RDH
+
+# Load and resize image
+img = cv2.imread("/content/shiva.jpg", cv2.IMREAD_GRAYSCALE)
+img = cv2.resize(img, (256, 256))
 
 # Initialize PVS-RDH
-pvs = PVS_RDH(K1=4, K2=6)
+pvs = PVS_RDH(K1=4, K2=6, overlap=False)
 
-# Embed watermark
-watermark = "Hello PVS-RDH!"
+# Prepare watermark
+watermark = "Secret Message!"
 watermark_bits = ''.join(format(ord(c), '08b') for c in watermark)
 
-embedded_image, embedding_info = pvs.embed_watermark(image, watermark_bits)
+# Embed
+embedded_image, info = pvs.embed_watermark(img, watermark_bits)
 
-# Extract watermark
-extracted_bits, recovered_image = pvs.extract_watermark(embedded_image, embedding_info)
+# Extract
+extracted_bits, recovered_image = pvs.extract_watermark(embedded_image, info)
 
-# Convert back to text
-extracted_text = ''
-for i in range(0, len(extracted_bits), 8):
-    if i + 8 <= len(extracted_bits):
-        byte = extracted_bits[i:i+8]
-        if len(byte) == 8:
-            extracted_text += chr(int(byte, 2))
+# Convert extracted bits to text
+chars = [chr(int(extracted_bits[i:i+8], 2)) for i in range(0, len(extracted_bits), 8)]
+print("Recovered text:", ''.join(chars))
 
-print(f"Original: {watermark}")
-print(f"Extracted: {extracted_text}")
-print(f"Match: {watermark == extracted_text}")
+# Display images
+plt.figure(figsize=(12, 4))
+
+plt.subplot(1, 3, 1)
+plt.imshow(img, cmap='gray')
+plt.title("Original Image")
+plt.axis('off')
+
+plt.subplot(1, 3, 2)
+plt.imshow(embedded_image, cmap='gray')
+plt.title("Embedded Image")
+plt.axis('off')
+
+plt.subplot(1, 3, 3)
+plt.imshow(recovered_image, cmap='gray')
+plt.title("Recovered Image")
+plt.axis('off')
+
+plt.tight_layout()
+plt.show()
+
 ```
 
 ### 2. Run Demo
