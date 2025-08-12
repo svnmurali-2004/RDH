@@ -293,3 +293,10 @@ class PVS_RDH:
         # Return extracted watermark bits as string and recovered image
         extracted_bitstring = ''.join('1' if b else '0' for b in extracted_payload_bits)
         return extracted_bitstring, recovered_img
+    
+    def calculate_metrics(img1, img2):
+        mse = np.mean((img1.astype(np.float32) - img2.astype(np.float32)) ** 2)
+        psnr = 10 * np.log10(255 ** 2 / mse) if mse > 0 else float('inf')
+        from skimage.metrics import structural_similarity as ssim
+        ssim_val = ssim(img1, img2, data_range=255)
+        return {'psnr': psnr, 'ssim': ssim_val, 'mse': mse}
