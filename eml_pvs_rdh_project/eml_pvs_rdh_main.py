@@ -1,234 +1,96 @@
-"""
-Enhanced Multi-Level Pixel Value Splitting RDH (EML-PVS-RDH)
-Main algorithm implementation with hierarchical embedding strategies
-"""
-
 import numpy as np
 from typing import Tuple, Dict, Optional, List
-import logging
-import time
 from dataclasses import dataclass
-
-logger = logging.getLogger(__name__)
+from PIL import Image
+import matplotlib.pyplot as plt
 
 @dataclass
 class EMLPVSConfig:
-    """Configuration parameters for EML-PVS-RDH algorithm"""
-    
-    # Core algorithm settings
     enable_dual_pass: bool = True
     adaptive_thresholds: bool = True
     region_classification: bool = True
-    
-    # Channel utilization
     enable_H_channel: bool = True
-    enable_M_channel: bool = True  
+    enable_M_channel: bool = True
     enable_L_channel: bool = True
-    
-    # Thresholds (adaptive if adaptive_thresholds=True)
     L_prediction_threshold: float = 1.0
     M_difference_threshold: float = 2.0
-    H_similarity_threshold: float = 0.0  # Strict equality
-    
-    # Region classification parameters
+    H_similarity_threshold: float = 0.0
     smooth_variance_threshold: float = 100.0
     edge_variance_threshold: float = 400.0
     region_window_size: int = 5
-    
-    # Optimization parameters
-    K1_range: Tuple[int, int] = (3, 7)  # Positive offset range
-    optimization_target: str = 'balanced'  # 'capacity', 'quality', 'balanced'
-    
-    # Performance settings
+    K1_range: Tuple[int, int] = (3, 7)
+    optimization_target: str = 'balanced'
     enable_parallel: bool = True
     memory_efficient: bool = True
     verbose: bool = False
 
 class EML_PVS_RDH:
-    """
-    Enhanced Multi-Level Pixel Value Splitting RDH
-    
-    Key improvements over traditional PVS-RDH:
-    1. Hierarchical three-level pixel decomposition (H, M, L)
-    2. Adaptive region classification (smooth, edge, texture)
-    3. Multi-strategy embedding framework
-    4. Dual-pass optimization for maximum capacity
-    5. Dynamic parameter adaptation
-    """
-    
     def __init__(self, config: Optional[EMLPVSConfig] = None):
-        """
-        Initialize Enhanced Multi-Level PVS-RDH algorithm
-        
-        Args:
-            config (EMLPVSConfig, optional): Algorithm configuration
-        """
         self.config = config or EMLPVSConfig()
-        
-        # Initialize core components (these would be imported from other modules)
-        # For now, we'll implement simplified versions
-        
-        # Performance tracking
         self.last_embedding_stats = {}
-        
-        logger.info("Initialized EML-PVS-RDH algorithm")
-        if self.config.verbose:
-            self._log_config()
-    
-    def _log_config(self):
-        """Log current configuration"""
-        logger.info("EML-PVS-RDH Configuration:")
-        logger.info(f"  Dual-pass embedding: {self.config.enable_dual_pass}")
-        logger.info(f"  Adaptive thresholds: {self.config.adaptive_thresholds}")
-        logger.info(f"  Region classification: {self.config.region_classification}")
-        logger.info(f"  Enabled channels: H={self.config.enable_H_channel}, M={self.config.enable_M_channel}, L={self.config.enable_L_channel}")
-    
+
     def pixel_value_splitting(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Perform hierarchical three-level pixel decomposition
-        
-        Args:
-            image (np.ndarray): Input grayscale image
-            
-        Returns:
-            Tuple[np.ndarray, np.ndarray, np.ndarray]: (H, M, L) channels
-        """
-        if image.dtype != np.uint8:
-            raise ValueError("Input image must be uint8 type")
-        
-        # Three-level decomposition
-        H = image // 100           # Hundreds place (0-2)
+        H = image // 100
         remainder = image % 100
-        M = remainder // 10        # Tens place (0-9)
-        L = remainder % 10         # Units place (0-9)
-        
+        M = remainder // 10
+        L = remainder % 10
         return H, M, L
-    
+
     def reconstruct_image(self, H: np.ndarray, M: np.ndarray, L: np.ndarray) -> np.ndarray:
-        """
-        Reconstruct image from H, M, L channels
-        
-        Args:
-            H, M, L (np.ndarray): Channel matrices
-            
-        Returns:
-            np.ndarray: Reconstructed image
-        """
         return (100 * H + 10 * M + L).astype(np.uint8)
-    
+
     def classify_regions(self, image: np.ndarray) -> np.ndarray:
-        """
-        Simple region classification
-        
-        Args:
-            image (np.ndarray): Input image
-            
-        Returns:
-            np.ndarray: Region map (0=smooth, 1=edge, 2=texture)
-        """
         height, width = image.shape
         region_map = np.zeros((height, width), dtype=np.uint8)
-        
-        # Simple variance-based classification
         for i in range(2, height-2):
             for j in range(2, width-2):
-                # 5x5 local window
                 window = image[i-2:i+3, j-2:j+3].astype(np.float32)
                 variance = np.var(window)
-                
                 if variance < self.config.smooth_variance_threshold:
-                    region_map[i, j] = 0  # SMOOTH
+                    region_map[i, j] = 0
                 elif variance < self.config.edge_variance_threshold:
-                    region_map[i, j] = 1  # EDGE
+                    region_map[i, j] = 1
                 else:
-                    region_map[i, j] = 2  # TEXTURE
-        
+                    region_map[i, j] = 2
         return region_map
-    
+
     def find_embedding_pairs(self, channel: np.ndarray, region_map: Optional[np.ndarray] = None) -> List[Tuple[int, int, int]]:
-        """
-        Find suitable pairs for embedding
-        
-        Args:
-            channel (np.ndarray): Channel matrix (H, M, or L)
-            region_map (np.ndarray, optional): Region classification map
-            
-        Returns:
-            List[Tuple[int, int, int]]: List of (row, col1, col2) pairs
-        """
         height, width = channel.shape
         pairs = []
-        
-        # Find horizontal adjacent pairs with same values
         for i in range(height):
-            for j in range(0, width-1, 2):  # Non-overlapping pairs
+            for j in range(0, width-1, 2):
                 if channel[i, j] == channel[i, j+1]:
-                    # Additional constraints based on region type
                     if region_map is not None:
                         region_type = region_map[i, j]
-                        if region_type == 2 and channel[i, j] == 0:  # Avoid underflow in texture
+                        if region_type == 2 and channel[i, j] == 0:
                             continue
-                    
-                    if channel[i, j] > 1:  # Avoid underflow
+                    if channel[i, j] > 1:
                         pairs.append((i, j, j+1))
-        
         return pairs
-    
+
     def embed(self, image: np.ndarray, watermark_bits: str) -> Tuple[np.ndarray, Dict]:
-        """
-        Embed watermark using Enhanced Multi-Level PVS-RDH
-        
-        Args:
-            image (np.ndarray): Input grayscale image (uint8)
-            watermark_bits (str): Watermark as binary string
-            
-        Returns:
-            Tuple[np.ndarray, Dict]: (embedded_image, embedding_info)
-        """
+        import time
         start_time = time.time()
-        
-        # Validate inputs
         self._validate_inputs(image, watermark_bits)
-        
-        # Step 1: Hierarchical pixel decomposition
-        logger.info("Step 1: Performing three-level pixel decomposition...")
         H, M, L = self.pixel_value_splitting(image)
-        
-        # Step 2: Region classification (if enabled)
-        region_map = None
-        if self.config.region_classification:
-            logger.info("Step 2: Classifying image regions...")
-            region_map = self.classify_regions(image)
-            self._log_region_statistics(region_map)
-        
-        # Step 3: Multi-level embedding
-        logger.info("Step 3: Performing multi-level embedding...")
+        region_map = self.classify_regions(image) if self.config.region_classification else None
         embedded_H, embedded_M, embedded_L, embedding_info = self._embed_multilevel(
             H, M, L, watermark_bits, region_map
         )
-        
-        # Step 4: Dual-pass optimization (if enabled and there are remaining bits)
         if self.config.enable_dual_pass and embedding_info.get('remaining_bits'):
-            logger.info("Step 4: Performing secondary embedding pass...")
-            embedded_H, embedded_M, embedded_L, second_pass_info = self._embed_secondary_pass(
-                embedded_H, embedded_M, embedded_L, 
-                embedding_info['remaining_bits'], 
+            embedded_H, embedded_M, embedded_L, second_pass_info = self._embed_multilevel(
+                embedded_H, embedded_M, embedded_L,
+                embedding_info['remaining_bits'],
                 region_map
             )
-            # Merge embedding information
             embedding_info['secondary_pass_bits'] = second_pass_info.get('embedded_bits', 0)
             embedding_info['total_embedded_bits'] = embedding_info.get('embedded_bits', 0) + embedding_info['secondary_pass_bits']
             embedding_info['dual_pass_used'] = True
-        
-        # Step 5: Reconstruct embedded image
-        logger.info("Step 5: Reconstructing embedded image...")
+        else:
+            embedding_info['total_embedded_bits'] = embedding_info.get('embedded_bits', 0)
         embedded_image = self.reconstruct_image(embedded_H, embedded_M, embedded_L)
-        
-        # Step 6: Calculate quality metrics
         embedding_time = time.time() - start_time
         metrics = self.calculate_metrics(image, embedded_image)
-        
-        # Finalize embedding information
         embedding_info.update({
             'algorithm': 'EML-PVS-RDH',
             'config': self.config.__dict__,
@@ -242,188 +104,151 @@ class EML_PVS_RDH:
                 'L_utilized': self.config.enable_L_channel
             }
         })
-        
-        # Store stats for analysis
+        embedding_info['embedded_pairs_info'] = self.embedded_pairs_info
         self.last_embedding_stats = embedding_info
-        
-        logger.info(f"Embedding completed in {embedding_time:.2f}s")
-        logger.info(f"Embedded {embedding_info.get('total_embedded_bits', len(watermark_bits))} bits ({embedding_info['payload_bpp']:.4f} bpp)")
-        logger.info(f"PSNR: {metrics['psnr']:.2f} dB, SSIM: {metrics['ssim']:.4f}")
-        
         return embedded_image, embedding_info
-    
-    def _embed_multilevel(self, H: np.ndarray, M: np.ndarray, L: np.ndarray, 
+
+    def _embed_multilevel(self, H: np.ndarray, M: np.ndarray, L: np.ndarray,
                          watermark_bits: str, region_map: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
-        """Perform multi-level embedding across H, M, L channels"""
-        
         embedded_H = H.copy()
-        embedded_M = M.copy() 
+        embedded_M = M.copy()
         embedded_L = L.copy()
-        
         bits_to_embed = list(watermark_bits)
         embedded_bits = 0
         auxiliary_data = []
-        
-        # Channel priority based on distortion impact: L -> M -> H
+        self.embedded_pairs_info = {'L': [], 'M': [], 'H': []}
         if self.config.enable_L_channel and bits_to_embed:
-            # Embed in L channel (lowest distortion)
             pairs_L = self.find_embedding_pairs(L, region_map)
             embedded_bits_L, aux_data_L = self._embed_in_channel(
                 embedded_L, bits_to_embed[:len(pairs_L)], pairs_L, channel_type='L'
             )
+            self.embedded_pairs_info['L'] = pairs_L[:embedded_bits_L]
             embedded_bits += embedded_bits_L
             auxiliary_data.extend(aux_data_L)
             bits_to_embed = bits_to_embed[embedded_bits_L:]
-        
         if self.config.enable_M_channel and bits_to_embed:
-            # Embed in M channel (medium distortion)
             pairs_M = self.find_embedding_pairs(embedded_M, region_map)
             embedded_bits_M, aux_data_M = self._embed_in_channel(
                 embedded_M, bits_to_embed[:len(pairs_M)], pairs_M, channel_type='M'
             )
+            self.embedded_pairs_info['M'] = pairs_M[:embedded_bits_M]
             embedded_bits += embedded_bits_M
             auxiliary_data.extend(aux_data_M)
             bits_to_embed = bits_to_embed[embedded_bits_M:]
-        
         if self.config.enable_H_channel and bits_to_embed:
-            # Embed in H channel (highest distortion)
             pairs_H = self.find_embedding_pairs(embedded_H, region_map)
             embedded_bits_H, aux_data_H = self._embed_in_channel(
                 embedded_H, bits_to_embed[:len(pairs_H)], pairs_H, channel_type='H'
             )
+            self.embedded_pairs_info['H'] = pairs_H[:embedded_bits_H]
             embedded_bits += embedded_bits_H
             auxiliary_data.extend(aux_data_H)
             bits_to_embed = bits_to_embed[embedded_bits_H:]
-        
         embedding_info = {
             'embedded_bits': embedded_bits,
             'remaining_bits': ''.join(bits_to_embed),
             'auxiliary_data': auxiliary_data,
-            'auxiliary_data_size': len(auxiliary_data) * 32,  # Assume 32 bits per index
-            'embedding_pairs': embedded_bits,  # Simplified
+            'auxiliary_data_size': len(auxiliary_data) * 32,
+            'embedding_pairs': embedded_bits,
             'watermark_length': len(watermark_bits)
         }
-        
         return embedded_H, embedded_M, embedded_L, embedding_info
-    
-    def _embed_in_channel(self, channel: np.ndarray, bits: List[str], pairs: List[Tuple], 
-                         channel_type: str) -> Tuple[int, List]:
-        """Embed bits in a specific channel"""
+
+    def _embed_in_channel(self, channel: np.ndarray, bits: List[str], pairs: List[Tuple], channel_type: str) -> Tuple[int, List]:
         embedded_count = 0
         auxiliary_data = []
-        
         for i, (row, col1, col2) in enumerate(pairs):
             if i >= len(bits):
                 break
-            
             bit = bits[i]
-            
-            # Check for potential underflow
             if channel[row, col2] == 0 and bit == '1':
-                # Would cause underflow, store location for auxiliary data
                 auxiliary_data.append(row * channel.shape[1] + col2)
                 continue
-            
-            # Embed bit
             if bit == '1':
                 channel[row, col2] = channel[row, col2] - 1
-            # If bit == '0', no change needed
-            
             embedded_count += 1
-            
-            # Apply offset to minimize distortion (simplified version)
-            if channel_type == 'L':
-                # For L channel, apply small offset to reduce visual impact
-                K1, K2 = 4, 6  # Default offsets
-                # This is a simplified version - full implementation would be more complex
-        
         return embedded_count, auxiliary_data
-    
-    def _embed_secondary_pass(self, H: np.ndarray, M: np.ndarray, L: np.ndarray,
-                            remaining_bits: str, region_map: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
-        """Perform secondary embedding pass with relaxed thresholds"""
-        
-        # Use relaxed thresholds for secondary pass
-        original_thresholds = (
-            self.config.L_prediction_threshold,
-            self.config.M_difference_threshold,
-            self.config.H_similarity_threshold
-        )
-        
-        # Relax thresholds by 50%
-        self.config.L_prediction_threshold *= 1.5
-        self.config.M_difference_threshold *= 1.5
-        self.config.H_similarity_threshold = 1.0  # Allow some difference
-        
-        # Attempt secondary embedding
-        embedded_H, embedded_M, embedded_L, embedding_info = self._embed_multilevel(
-            H, M, L, remaining_bits, region_map
-        )
-        
-        # Restore original thresholds
-        (self.config.L_prediction_threshold,
-         self.config.M_difference_threshold,
-         self.config.H_similarity_threshold) = original_thresholds
-        
-        return embedded_H, embedded_M, embedded_L, embedding_info
-    
+
     def extract(self, embedded_image: np.ndarray, embedding_info: Dict) -> Tuple[str, np.ndarray]:
-        """
-        Extract watermark and recover original image
-        
-        Args:
-            embedded_image (np.ndarray): Embedded image
-            embedding_info (Dict): Information from embedding process
-            
-        Returns:
-            Tuple[str, np.ndarray]: (extracted_watermark_bits, recovered_image)
-        """
-        start_time = time.time()
-        
-        # Validate inputs
-        if embedded_image.dtype != np.uint8:
-            raise ValueError("Embedded image must be uint8 type")
-        if embedded_image.shape != tuple(embedding_info['image_shape']):
-            raise ValueError("Image shape doesn't match embedding info")
-        
-        logger.info("Starting watermark extraction and image recovery...")
-        
-        # Decompose embedded image
         H_embedded, M_embedded, L_embedded = self.pixel_value_splitting(embedded_image)
-        
-        # Extract bits from each channel (reverse of embedding process)
-        extracted_bits = self._extract_from_channels(H_embedded, M_embedded, L_embedded, embedding_info)
-        
-        # Recover original channels
-        H_recovered, M_recovered, L_recovered = self._recover_channels(H_embedded, M_embedded, L_embedded, embedding_info)
-        
-        # Reconstruct original image
-        recovered_image = self.reconstruct_image(H_recovered, M_recovered, L_recovered)
-        
-        extraction_time = time.time() - start_time
-        
-        logger.info(f"Extraction completed in {extraction_time:.2f}s")
-        logger.info(f"Extracted {len(extracted_bits)} bits")
-        
-        return extracted_bits, recovered_image
-    
-    def _extract_from_channels(self, H: np.ndarray, M: np.ndarray, L: np.ndarray, embedding_info: Dict) -> str:
-        """Extract bits from embedded channels"""
-        extracted_bits = []
-        
-        # This is a simplified extraction - full implementation would be more complex
-        # For now, return a placeholder
+        pairs_info = embedding_info.get('embedded_pairs_info', {})
+        auxiliary_data = set(embedding_info.get('auxiliary_data', []))
         watermark_length = embedding_info.get('watermark_length', 0)
-        return '1' * watermark_length  # Placeholder
-    
-    def _recover_channels(self, H: np.ndarray, M: np.ndarray, L: np.ndarray, embedding_info: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Recover original channels from embedded channels"""
-        # This is a simplified recovery - full implementation would reverse all embedding operations
-        # For now, return copies (placeholder)
-        return H.copy(), M.copy(), L.copy()
-    
+        extracted_bits = []
+        def extract_bits(channel, pairs):
+            bits = []
+            for row, col1, col2 in pairs:
+                if (row * channel.shape[1] + col2) in auxiliary_data:
+                    continue
+                if channel[row, col1] == channel[row, col2]:  # '0'
+                    bits.append('0')
+                elif channel[row, col1] == channel[row, col2] + 1:  # '1'
+                    bits.append('1')
+                if len(bits) + len(extracted_bits) >= watermark_length:
+                    break
+            return bits
+        if 'L' in pairs_info:
+            extracted_bits.extend(extract_bits(L_embedded, pairs_info['L']))
+        if 'M' in pairs_info and len(extracted_bits) < watermark_length:
+            extracted_bits.extend(extract_bits(M_embedded, pairs_info['M']))
+        if 'H' in pairs_info and len(extracted_bits) < watermark_length:
+            extracted_bits.extend(extract_bits(H_embedded, pairs_info['H']))
+        H_recovered, M_recovered, L_recovered = self._recover_channels(H_embedded, M_embedded, L_embedded, embedding_info)
+        recovered_image = self.reconstruct_image(H_recovered, M_recovered, L_recovered)
+        return ''.join(extracted_bits[:watermark_length]), recovered_image
+
+    def _recover_channels(self, H, M, L, embedding_info: Dict):
+        pairs_info = embedding_info.get('embedded_pairs_info', {})
+        auxiliary_data = set(embedding_info.get('auxiliary_data', []))
+        for row, col1, col2 in pairs_info.get('L', []):
+            if (row * L.shape[1] + col2) in auxiliary_data:
+                continue
+            if L[row, col1] == L[row, col2] + 1:
+                L[row, col2] = L[row, col2] + 1
+        for row, col1, col2 in pairs_info.get('M', []):
+            if (row * M.shape[1] + col2) in auxiliary_data:
+                continue
+            if M[row, col1] == M[row, col2] + 1:
+                M[row, col2] = M[row, col2] + 1
+        for row, col1, col2 in pairs_info.get('H', []):
+            if (row * H.shape[1] + col2) in auxiliary_data:
+                continue
+            if H[row, col1] == H[row, col2] + 1:
+                H[row, col2] = H[row, col2] + 1
+        return H, M, L
+
+    def calculate_metrics(self, original: np.ndarray, embedded: np.ndarray) -> Dict:
+        mse = np.mean((original.astype(np.float32) - embedded.astype(np.float32)) ** 2)
+        if mse == 0:
+            psnr = float('inf')
+        else:
+            psnr = 10 * np.log10(255**2 / mse)
+        ssim = self._calculate_ssim(original, embedded)
+        max_absolute_error = np.max(np.abs(original.astype(np.int16) - embedded.astype(np.int16)))
+        return {
+            'mse': float(mse),
+            'psnr': float(psnr),
+            'ssim': float(ssim),
+            'max_absolute_error': int(max_absolute_error)
+        }
+
+    def _calculate_ssim(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        img1 = img1.astype(np.float32)
+        img2 = img2.astype(np.float32)
+        mu1 = np.mean(img1)
+        mu2 = np.mean(img2)
+        var1 = np.var(img1)
+        var2 = np.var(img2)
+        cov12 = np.mean((img1 - mu1) * (img2 - mu2))
+        C1 = (0.01 * 255) ** 2
+        C2 = (0.03 * 255) ** 2
+        numerator = (2 * mu1 * mu2 + C1) * (2 * cov12 + C2)
+        denominator = (mu1**2 + mu2**2 + C1) * (var1 + var2 + C2)
+        if denominator == 0:
+            return 1.0
+        return numerator / denominator
+
     def _validate_inputs(self, image: np.ndarray, watermark_bits: str):
-        """Validate input parameters"""
         if image.dtype != np.uint8:
             raise ValueError("Image must be uint8 type")
         if len(image.shape) != 2:
@@ -434,176 +259,112 @@ class EML_PVS_RDH:
             raise ValueError("Watermark must contain only '0' and '1' characters")
         if len(watermark_bits) == 0:
             raise ValueError("Watermark cannot be empty")
-    
-    def _log_region_statistics(self, region_map: np.ndarray):
-        """Log statistics about region classification"""
-        unique, counts = np.unique(region_map, return_counts=True)
-        total_pixels = region_map.size
-        
-        for region_type, count in zip(unique, counts):
-            percentage = (count / total_pixels) * 100
-            region_name = {0: 'Smooth', 1: 'Edge', 2: 'Texture'}.get(region_type, 'Unknown')
-            logger.info(f"  {region_name} regions: {count} pixels ({percentage:.1f}%)")
-    
-    def calculate_metrics(self, original: np.ndarray, embedded: np.ndarray) -> Dict:
-        """Calculate comprehensive quality metrics"""
-        # MSE and PSNR
-        mse = np.mean((original.astype(np.float32) - embedded.astype(np.float32)) ** 2)
-        if mse == 0:
-            psnr = float('inf')
-        else:
-            psnr = 10 * np.log10(255**2 / mse)
-        
-        # SSIM (simplified implementation)
-        ssim = self._calculate_ssim(original, embedded)
-        
-        # Additional metrics
-        max_absolute_error = np.max(np.abs(original.astype(np.int16) - embedded.astype(np.int16)))
-        
-        return {
-            'mse': float(mse),
-            'psnr': float(psnr),
-            'ssim': float(ssim),
-            'max_absolute_error': int(max_absolute_error)
-        }
-    
-    def _calculate_ssim(self, img1: np.ndarray, img2: np.ndarray) -> float:
-        """Calculate Structural Similarity Index (simplified)"""
-        # Convert to float
-        img1 = img1.astype(np.float32)
-        img2 = img2.astype(np.float32)
-        
-        # Calculate means
-        mu1 = np.mean(img1)
-        mu2 = np.mean(img2)
-        
-        # Calculate variances and covariance
-        var1 = np.var(img1)
-        var2 = np.var(img2)
-        cov12 = np.mean((img1 - mu1) * (img2 - mu2))
-        
-        # SSIM formula constants
-        C1 = (0.01 * 255) ** 2
-        C2 = (0.03 * 255) ** 2
-        
-        # Calculate SSIM
-        numerator = (2 * mu1 * mu2 + C1) * (2 * cov12 + C2)
-        denominator = (mu1**2 + mu2**2 + C1) * (var1 + var2 + C2)
-        
-        if denominator == 0:
-            return 1.0
-        
-        return numerator / denominator
-    
-    def get_capacity_estimate(self, image: np.ndarray) -> Dict:
-        """
-        Estimate embedding capacity for given image
-        
-        Args:
-            image (np.ndarray): Input grayscale image
-            
-        Returns:
-            Dict: Detailed capacity estimates
-        """
-        # Decompose image
-        H, M, L = self.pixel_value_splitting(image)
-        
-        # Find embedding pairs for each channel
-        pairs_H = self.find_embedding_pairs(H) if self.config.enable_H_channel else []
-        pairs_M = self.find_embedding_pairs(M) if self.config.enable_M_channel else []
-        pairs_L = self.find_embedding_pairs(L) if self.config.enable_L_channel else []
-        
-        total_capacity = len(pairs_H) + len(pairs_M) + len(pairs_L)
-        
-        estimates = {
-            'H_channel': {
-                'pairs': len(pairs_H),
-                'capacity_bpp': len(pairs_H) / image.size,
-                'distortion_impact': 'HIGH'
-            },
-            'M_channel': {
-                'pairs': len(pairs_M),
-                'capacity_bpp': len(pairs_M) / image.size,
-                'distortion_impact': 'MEDIUM'
-            },
-            'L_channel': {
-                'pairs': len(pairs_L),
-                'capacity_bpp': len(pairs_L) / image.size,
-                'distortion_impact': 'LOW'
-            },
-            'total_estimated_capacity': total_capacity / image.size,
-            'eml_pvs_estimate': {
-                'primary_pass_bpp': (total_capacity * 0.8) / image.size,
-                'secondary_pass_bpp': (total_capacity * 0.15) / image.size,
-                'total_eml_bpp': (total_capacity * 0.95) / image.size
-            }
-        }
-        
-        return estimates
 
-# Convenience functions for easy usage
+    def calculate_capacity(self, image: np.ndarray) -> Dict:
+        H, M, L = self.pixel_value_splitting(image)
+        # Fast variant, no region classification for estimation
+        def fast_pairs(channel):
+            height, width = channel.shape
+            pairs = 0
+            for i in range(height):
+                for j in range(0, width-1, 2):
+                    if channel[i, j] == channel[i, j+1] and channel[i, j] > 1:
+                        pairs += 1
+            return pairs
+        capacity_L = fast_pairs(L) if self.config.enable_L_channel else 0
+        capacity_M = fast_pairs(M) if self.config.enable_M_channel else 0
+        capacity_H = fast_pairs(H) if self.config.enable_H_channel else 0
+        total_capacity_bits = capacity_L + capacity_M + capacity_H
+        if self.config.enable_dual_pass:
+            estimated_second_pass = int(total_capacity_bits * 0.3)
+            total_capacity_bits_dual = total_capacity_bits + estimated_second_pass
+        else:
+            total_capacity_bits_dual = total_capacity_bits
+            estimated_second_pass = 0
+        total_pixels = image.size
+        bpp_single_pass = total_capacity_bits / total_pixels
+        bpp_dual_pass = total_capacity_bits_dual / total_pixels
+        max_chars_single = total_capacity_bits // 8
+        max_chars_dual = total_capacity_bits_dual // 8
+        return {
+            'image_shape': image.shape,
+            'total_pixels': total_pixels,
+            'capacity_bits_single_pass': total_capacity_bits,
+            'capacity_bits_dual_pass': total_capacity_bits_dual,
+            'estimated_second_pass_bits': estimated_second_pass,
+            'bpp_single_pass': bpp_single_pass,
+            'bpp_dual_pass': bpp_dual_pass,
+            'max_characters_single_pass': max_chars_single,
+            'max_characters_dual_pass': max_chars_dual,
+            'channel_L': capacity_L,
+            'channel_M': capacity_M,
+            'channel_H': capacity_H
+        }
+
 def embed_watermark(image: np.ndarray, watermark: str, **kwargs) -> Tuple[np.ndarray, Dict]:
-    """
-    Convenience function to embed watermark text using EML-PVS-RDH
-    
-    Args:
-        image (np.ndarray): Input grayscale image
-        watermark (str): Text to embed
-        **kwargs: Configuration parameters
-        
-    Returns:
-        Tuple[np.ndarray, Dict]: (embedded_image, embedding_info)
-    """
-    # Convert text to binary
     watermark_bits = ''.join(format(ord(c), '08b') for c in watermark)
-    
-    # Create algorithm instance
     config = EMLPVSConfig(**kwargs)
     eml = EML_PVS_RDH(config)
-    
-    # Embed watermark
     return eml.embed(image, watermark_bits)
 
 def extract_watermark(embedded_image: np.ndarray, embedding_info: Dict) -> Tuple[str, np.ndarray]:
-    """
-    Convenience function to extract watermark text
-    
-    Args:
-        embedded_image (np.ndarray): Embedded image
-        embedding_info (Dict): Embedding information
-        
-    Returns:
-        Tuple[str, np.ndarray]: (extracted_text, recovered_image)
-    """
-    # Create algorithm instance with saved config
     config = EMLPVSConfig(**embedding_info['config'])
     eml = EML_PVS_RDH(config)
-    
-    # Extract watermark
     watermark_bits, recovered_image = eml.extract(embedded_image, embedding_info)
-    
-    # Convert binary to text
-    watermark_text = ''.join(chr(int(watermark_bits[i:i+8], 2)) 
+    watermark_text = ''.join(chr(int(watermark_bits[i:i+8], 2))
                             for i in range(0, len(watermark_bits), 8)
                             if i+8 <= len(watermark_bits))
-    
     return watermark_text, recovered_image
 
-# Example usage
-if __name__ == "__main__":
-    import cv2
-    
-    # Load test image
-    image = np.random.randint(0, 256, (256, 256), dtype=np.uint8)
-    
-    # Test embedding
-    watermark = "Enhanced PVS-RDH with 67% better capacity!"
-    embedded_img, info = embed_watermark(image, watermark, verbose=True)
-    
-    # Test extraction
-    extracted_text, recovered_img = extract_watermark(embedded_img, info)
-    
-    print(f"Original text: {watermark}")
-    print(f"Extracted text: {extracted_text}")
-    print(f"Perfect recovery: {np.array_equal(image, recovered_img)}")
-    print(f"PSNR: {info['quality_metrics']['psnr']:.2f} dB")
+# ----------- MAIN EXECUTION EXAMPLE -----------
+
+img_path = "/content/icons8-ai-100.png"  # Replace with your grayscale image file
+img_pil = Image.open(img_path).convert('L')
+image = np.array(img_pil)
+
+watermark = "Enhanced PVS-RDH with 67% better capacity!"
+
+# Embed and extract
+embedded_img, info = embed_watermark(image, watermark, verbose=True)
+extracted_text, recovered_img = extract_watermark(embedded_img, info)
+
+print("Extracted Watermark:", extracted_text)
+print("\n--- Quality Metrics ---")
+for k, v in info['quality_metrics'].items():
+    print(f"{k.upper()}: {v}")
+print(f"\nPerfect recovery: {np.array_equal(image, recovered_img)}")
+print(f"Total embedded bits: {info.get('total_embedded_bits', 0)} / {info.get('watermark_length', 0)}")
+
+# Display images
+plt.figure(figsize=(12, 4))
+plt.subplot(1,3,1)
+plt.imshow(image, cmap='gray')
+plt.title("Original Image")
+plt.axis('off')
+plt.subplot(1,3,2)
+plt.imshow(embedded_img, cmap='gray')
+plt.title("Embedded Image")
+plt.axis('off')
+plt.subplot(1,3,3)
+plt.imshow(recovered_img, cmap='gray')
+plt.title("Recovered Image")
+plt.axis('off')
+plt.show()
+
+plt.figure(figsize=(6,3))
+plt.hist(image.ravel(), bins=256, range=(0,255), alpha=0.5, label='Original', color='blue')
+plt.hist(embedded_img.ravel(), bins=256, range=(0,255), alpha=0.5, label='Embedded', color='red')
+plt.title("Histogram: Original vs Embedded Image")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.legend()
+plt.show()
+
+# ----------- CAPACITY CHECK DEMO -----------
+eml = EML_PVS_RDH()
+cap_info = eml.calculate_capacity(image)
+print("\n--- Capacity Analysis ---")
+print(f"Max characters (dual pass): {cap_info['max_characters_dual_pass']}")
+print(f"Bits per pixel (dual pass): {cap_info['bpp_dual_pass']:.4f}")
+print(f"Single/dual pass bits: {cap_info['capacity_bits_single_pass']} / {cap_info['capacity_bits_dual_pass']}")
+print(f"Channel capacities: L={cap_info['channel_L']}, M={cap_info['channel_M']}, H={cap_info['channel_H']}")
